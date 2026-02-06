@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.19.7"
-app = marimo.App(width="columns")
+app = marimo.App(width="columns", sql_output="polars")
 
 
 @app.cell(column=0)
@@ -28,29 +28,14 @@ def _(OpenDotaAPI, StratzAPI, os, pathlib):
 
     opendota = OpenDotaAPI(cache_path=db_cache_path)
     stratz   = StratzAPI(token=os.environ["STRATZ_TOKEN"], cache_path=db_cache_path)
-    return opendota, stratz
-
-
-@app.cell
-async def _(opendota):
-    _q = """
-    SELECT
-      p.account_id
-    FROM
-      player_matches AS p
-    WHERE
-      p.match_id = ?
-    """
-
-    _r = await opendota.explorer(_q.replace("?", "8677867934"))
-    _r.json()
-    return
+    return (stratz,)
 
 
 @app.cell
 async def _(Match, stratz):
-    _r = await stratz.match(match_id=8677867934)
-    Match.model_validate(_r.json(), context={"provider": "STRATZ"})
+    _r = await stratz.match(match_id=8678575691)
+    _m = Match.model_validate(_r.json(), context={"provider": "STRATZ"})
+    _m.players
     return
 
 
@@ -83,10 +68,11 @@ def _():
 @app.cell
 def _(Annotated, Any, Literal, ValidationInfo, dt, glom, pydantic):
     class GlomModel(pydantic.BaseModel):
-        """ """
+        """A base class which defers to Glom under specific context."""
+
         @pydantic.model_validator(mode="before")
         @classmethod
-        def _reshape_if_requested(cls, data: Any, info: ValidationInfo) -> Any:
+        def defer_to_glom(cls, data: Any, info: ValidationInfo) -> Any:
             if info.context is None:
                 return data
 
@@ -96,29 +82,77 @@ def _(Annotated, Any, Literal, ValidationInfo, dt, glom, pydantic):
             return data
 
 
-
-    class MatchPlayer(GlomModel):
-        """Represent the data about a DOTA player in a match."""
-        match_id: int
-        steam_account_id: int
-        player_slot: int
-        team: Literal["RADIANT", "DIRE"]
-
-        @pydantic.field_validator("team", mode="before")
-        @classmethod
-        def bool_to_enum(cls, value: bool) -> Literal["RADIANT", "DIRE"]:
-            return "RADIANT" if value else "DIRE"
+    class UnitMovement(GlomModel):
+        """Represents the data about the location of a unit in a match."""
+        timestamp: int
+        x: int
+        y: int
 
         @classmethod
         def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
             """Reshapes a STRATZ response into a MatchPlayer schema."""
-            PLAYER = glom.T
 
             spec = {
-                "match_id": PLAYER["matchId"],
-                "steam_account_id": PLAYER["steamAccountId"],
-                "player_slot": PLAYER["playerSlot"],
-                "team": PLAYER["isRadiant"],
+                "timestamp": "time",
+                "x": "x",
+                "y": "y",
+            }
+
+            return glom.glom(data, spec)
+
+
+    class MatchPlayer(GlomModel):
+        """Represents the data about a DOTA player in a match."""
+        steam_account_id: int
+        party_id: int | None
+        player_slot: int
+        team: Literal["RADIANT", "DIRE"]
+        hero_id: int
+        is_random: bool
+        leaver_status: str | None
+        award: Literal["MVP", "TOP_CORE", "TOP_SUPPORT"] | None
+        prediction_streak: int | None
+        position: int | None
+        role: Literal["CORE", "LIGHT_SUPPORT", "HARD_SUPPORT"] | None
+        movement: list[UnitMovement]
+
+        @pydantic.field_validator("team", mode="before")
+        @classmethod
+        def bool_to_enum(cls, value: bool | str) -> Literal["RADIANT", "DIRE"]:
+            if isinstance(value, str):
+                return value
+            return "RADIANT" if value else "DIRE"
+
+        @pydantic.field_validator("leaver_status", "award", mode="before")
+        @classmethod
+        def coerce_none(cls, value: str | None) -> str | None:
+            if value == "NONE":
+                return None
+            return value
+
+        @pydantic.field_validator("position", mode="before")
+        @classmethod
+        def coerce_position(cls, value: str | int | None) -> int | None:
+            if value is None or isinstance(value, int):
+                return value
+            return int(value.replace("POSITION_", ""))
+
+        @classmethod
+        def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
+            """Reshapes a STRATZ response into a MatchPlayer schema."""
+            spec = {
+                "steam_account_id": "steamAccountId",
+                "party_id": "partyId",
+                "player_slot": "playerSlot",
+                "team": "isRadiant",
+                "hero_id": "heroId",
+                "is_random": "isRandom",
+                "leaver_status": "leaverStatus",
+                "award": "award",
+                "position": "position",
+                "prediction_streak": "streakPrediction",
+                "role": "role",
+                "movement": "playbackData.playerUpdatePositionEvents",
             }
 
             return glom.glom(data, spec)
@@ -127,13 +161,15 @@ def _(Annotated, Any, Literal, ValidationInfo, dt, glom, pydantic):
     class Match(GlomModel):
         """Represents the data about a DOTA match."""
         match_id: int
-        league_id: int
-        series_id: int
+        league_id: int | None
+        series_id: int | None
         region_id: int
         game_version_id: int
         start_dt: Annotated[pydantic.AwareDatetime, "in UTC"]
         duration: int
         game_mode: str
+        is_ranked: bool
+        rank: int
         radiant_win: bool
         players: list[MatchPlayer]
 
@@ -147,28 +183,24 @@ def _(Annotated, Any, Literal, ValidationInfo, dt, glom, pydantic):
         @classmethod
         def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
             """Reshapes a STRATZ response into a Match schema."""
-            MATCH = glom.T["data"]["match"]
 
             spec = {
-                "match_id": MATCH["id"],
-                "league_id": MATCH["leagueId"],
-                "series_id": MATCH["seriesId"],
-                "region_id": MATCH["regionId"],
-                "game_version_id": MATCH["gameVersionId"],
-                "start_dt": MATCH["startDateTime"],
-                "duration": MATCH["durationSeconds"],
-                "game_mode": MATCH["gameMode"],
-                "radiant_win": MATCH["didRadiantWin"],
-                "players": MATCH["players"],
+                "match_id": "data.match.id",
+                "league_id": "data.match.leagueId",
+                "series_id": "data.match.seriesId",
+                "region_id": "data.match.regionId",
+                "game_version_id": "data.match.gameVersionId",
+                "start_dt": "data.match.startDateTime",
+                "duration": "data.match.durationSeconds",
+                "game_mode": "data.match.gameMode",
+                "is_ranked": "data.match.isStats",
+                "rank": "data.match.actualRank",
+                "radiant_win": "data.match.didRadiantWin",
+                "players": "data.match.players",
             }
 
             return glom.glom(data, spec)
     return (Match,)
-
-
-@app.cell
-def _():
-    return
 
 
 @app.cell(column=2)
@@ -228,10 +260,11 @@ def _(AsyncRateLimitHook, SQLiteCacheMixin, __project__, niquests):
                 startDateTime
                 durationSeconds
                 gameMode
+                isStats  # lobbyType?
+                actualRank
                 didRadiantWin
-            
+
                 players {
-                  matchId
                   steamAccountId
                   partyId
                   playerSlot
@@ -241,8 +274,16 @@ def _(AsyncRateLimitHook, SQLiteCacheMixin, __project__, niquests):
                   leaverStatus
                   award
                   position
+                  streakPrediction
                   role
-                  roleBasic
+
+                  playbackData {
+                    playerUpdatePositionEvents {
+                      time
+                      x
+                      y
+                    }
+                  }
                 }
               }
             }
