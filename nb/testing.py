@@ -19,7 +19,7 @@ def _():
 
     from koda._task import InstrumentedCoroutine, InstrumentedTask
     from koda import __project__
-    return Annotated, Any, Literal, __project__, asyncio, os, pathlib
+    return __project__, asyncio, os, pathlib
 
 
 @app.cell
@@ -29,6 +29,11 @@ def _(OpenDotaAPI, StratzAPI, os, pathlib):
     opendota = OpenDotaAPI(cache_path=db_cache_path)
     stratz   = StratzAPI(token=os.environ["STRATZ_TOKEN"], cache_path=db_cache_path)
     return (stratz,)
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -62,145 +67,7 @@ def _():
     import glom
     import niquests
     import pydantic
-    return aiosqlite, dt, glom, hashlib, json, niquests, pydantic
-
-
-@app.cell
-def _(Annotated, Any, Literal, ValidationInfo, dt, glom, pydantic):
-    class GlomModel(pydantic.BaseModel):
-        """A base class which defers to Glom under specific context."""
-
-        @pydantic.model_validator(mode="before")
-        @classmethod
-        def defer_to_glom(cls, data: Any, info: ValidationInfo) -> Any:
-            if info.context is None:
-                return data
-
-            if info.context["provider"] == "STRATZ":
-                return cls.__stratz_api__(data)
-
-            return data
-
-
-    class UnitMovement(GlomModel):
-        """Represents the data about the location of a unit in a match."""
-        timestamp: int
-        x: int
-        y: int
-
-        @classmethod
-        def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
-            """Reshapes a STRATZ response into a MatchPlayer schema."""
-
-            spec = {
-                "timestamp": "time",
-                "x": "x",
-                "y": "y",
-            }
-
-            return glom.glom(data, spec)
-
-
-    class MatchPlayer(GlomModel):
-        """Represents the data about a DOTA player in a match."""
-        steam_account_id: int
-        party_id: int | None
-        player_slot: int
-        team: Literal["RADIANT", "DIRE"]
-        hero_id: int
-        is_random: bool
-        leaver_status: str | None
-        award: Literal["MVP", "TOP_CORE", "TOP_SUPPORT"] | None
-        prediction_streak: int | None
-        position: int | None
-        role: Literal["CORE", "LIGHT_SUPPORT", "HARD_SUPPORT"] | None
-        movement: list[UnitMovement]
-
-        @pydantic.field_validator("team", mode="before")
-        @classmethod
-        def bool_to_enum(cls, value: bool | str) -> Literal["RADIANT", "DIRE"]:
-            if isinstance(value, str):
-                return value
-            return "RADIANT" if value else "DIRE"
-
-        @pydantic.field_validator("leaver_status", "award", mode="before")
-        @classmethod
-        def coerce_none(cls, value: str | None) -> str | None:
-            if value == "NONE":
-                return None
-            return value
-
-        @pydantic.field_validator("position", mode="before")
-        @classmethod
-        def coerce_position(cls, value: str | int | None) -> int | None:
-            if value is None or isinstance(value, int):
-                return value
-            return int(value.replace("POSITION_", ""))
-
-        @classmethod
-        def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
-            """Reshapes a STRATZ response into a MatchPlayer schema."""
-            spec = {
-                "steam_account_id": "steamAccountId",
-                "party_id": "partyId",
-                "player_slot": "playerSlot",
-                "team": "isRadiant",
-                "hero_id": "heroId",
-                "is_random": "isRandom",
-                "leaver_status": "leaverStatus",
-                "award": "award",
-                "position": "position",
-                "prediction_streak": "streakPrediction",
-                "role": "role",
-                "movement": "playbackData.playerUpdatePositionEvents",
-            }
-
-            return glom.glom(data, spec)
-
-
-    class Match(GlomModel):
-        """Represents the data about a DOTA match."""
-        match_id: int
-        league_id: int | None
-        series_id: int | None
-        region_id: int
-        game_version_id: int
-        start_dt: Annotated[pydantic.AwareDatetime, "in UTC"]
-        duration: int
-        game_mode: str
-        is_ranked: bool
-        rank: int
-        radiant_win: bool
-        players: list[MatchPlayer]
-
-        @pydantic.field_validator("start_dt", mode="before")
-        @classmethod
-        def timestamp_to_utc_dt(cls, value: int | dt.datetime) -> dt.datetime:
-            if isinstance(value, dt.datetime):
-                return value
-            return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
-
-        @classmethod
-        def __stratz_api__(cls, data: dict[str, Any]) -> dict[str, Any]:
-            """Reshapes a STRATZ response into a Match schema."""
-
-            spec = {
-                "match_id": "data.match.id",
-                "league_id": "data.match.leagueId",
-                "series_id": "data.match.seriesId",
-                "region_id": "data.match.regionId",
-                "game_version_id": "data.match.gameVersionId",
-                "start_dt": "data.match.startDateTime",
-                "duration": "data.match.durationSeconds",
-                "game_mode": "data.match.gameMode",
-                "is_ranked": "data.match.isStats",
-                "rank": "data.match.actualRank",
-                "radiant_win": "data.match.didRadiantWin",
-                "players": "data.match.players",
-            }
-
-            return glom.glom(data, spec)
-    return (Match,)
+    return aiosqlite, dt, hashlib, json, niquests
 
 
 @app.cell(column=2)
